@@ -15,6 +15,14 @@ ACTIONS = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1))
 LAYERS, WIDTH, HEADS, INNER, CONTEXT = 4, 128, 4, 352, 64
 INPUT = 18
 FORMAT = 1
+NO_SM_FORMAT = 2
+# Full token indices 3 and 8 encode the SM fraction and its availability bit.
+NO_SM_COLUMNS = tuple(i for i in range(INPUT) if i not in (3, 8))
+
+
+def model_inputs(tokens, use_sm):
+    return tokens if use_sm else tokens[..., NO_SM_COLUMNS]
+
 
 
 def features(k, g, wait, sm, slowdown, rate, work_left, reset):
@@ -47,9 +55,14 @@ def norm(x, gain):
 class CPUModel:
     def __init__(self, path):
         with np.load(path, allow_pickle=False) as checkpoint:
-            if int(checkpoint['format_version']) != FORMAT:
+            version = int(checkpoint['format_version'])
+            if version not in (FORMAT, NO_SM_FORMAT):
                 raise ValueError('unsupported policy format')
+            self.uses_sm = version == FORMAT
             self.w = {k: checkpoint[k] for k in checkpoint.files if k != 'format_version'}
+        expected = INPUT if self.uses_sm else len(NO_SM_COLUMNS)
+        if self.w['embed.weight'].shape != (WIDTH, expected):
+            raise ValueError('policy feature schema and embedding shape disagree')
         self.cache = [[] for _ in range(LAYERS)]
         self.history = deque(maxlen=CONTEXT)
         self.freq = np.float32(10000) ** (-np.arange(0, WIDTH//HEADS, 2, dtype=np.float32)/(WIDTH//HEADS))
@@ -78,6 +91,7 @@ class CPUModel:
         return w['head.weight'] @ norm(x,w['final.weight']) + w['head.bias']
 
     def logits(self, x):
+        x = model_inputs(x, self.uses_sm)
         self.history.append(x.copy())
         if len(self.cache[0]) == CONTEXT:
             # Recompute retained tokens so old context cannot leak through their cached states.
@@ -100,10 +114,12 @@ class Session:
         self.previous = None
         self.windows = 0
 
-    def propose(self, *, wait, sm, slowdown, rate, work_left, elapsed_s, switch_s):
+    def propose(self, *, wait, sm=None, slowdown, rate, work_left, elapsed_s, switch_s):
         """elapsed_s covers the settled observation; switch_s is disjoint transition time."""
         if self.pending is not None:
             raise RuntimeError('acknowledge the previous proposal first')
+        if not self.model.uses_sm:
+            sm = None
         for v in (wait, sm):
             if v is not None and not 0 <= v <= 1:
                 raise ValueError('expected fractional telemetry or null')
@@ -116,7 +132,7 @@ class Session:
                   -(elapsed_s+switch_s) if self.windows else 0)
         logits = self.model.logits(x)
         mask = action_mask(c,self.limits,self.rejected)
-        if wait is None or sm is None:
+        if wait is None or (self.model.uses_sm and sm is None):
             mask[1:] = False
         scores = np.where(mask,logits,-np.inf)
         if self.windows < 3:

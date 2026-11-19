@@ -28,9 +28,9 @@ class Block(nn.Module):
 
 
 class Transformer(nn.Module):
-    def __init__(self,outputs):
+    def __init__(self,outputs,input_dim=INPUT):
         super().__init__()
-        self.embed = nn.Linear(INPUT,WIDTH)
+        self.embed = nn.Linear(input_dim,WIDTH)
         self.blocks = nn.ModuleList(Block() for _ in range(LAYERS))
         self.final = nn.RMSNorm(WIDTH,eps=1e-6)
         self.head = nn.Linear(WIDTH,outputs)

@@ -80,3 +80,12 @@ The JSONL protocol starts by requesting (12,3). Reply to configure with a boolea
 Use null for missing wait, SM activity or slowdown. Rate is effective environment steps/s; work_left is a decision-time estimate in the same step units. Supply total window elapsed seconds excluding the separately measured switch time; any completed rollout work counts toward the suite. Reply null instead of a record once the suite is complete. Python hosts can create a `rollout_autotune.dit.Session` for each suite and call `propose` then `acknowledge` for every decision, including holds.
 
 The actor runs exclusively in NumPy with a per-session KV cache. It applies bounds and rejected-target masks before sampling the first three windows (temperature 0.5) and then selects the highest allowed logit. Missing wait or SM activity forces HOLD, including when measured slowdown is high. A rejected destination stays masked until a new session. The action order is HOLD, K+1, K−1, g+1, g−1. After the 64-token limit the predictor rebuilds the retained suffix for equivalence with a bounded full forward.
+
+### SM-free policy
+
+Use `--no-sm` during training to fit both networks with 16 input features. This removes
+the SM fraction and its presence indicator. Training and inference select the same
+columns. The policy artifact carries its feature schema. The standard DIT CLI can
+load either checkpoint format. An SM-free session accepts observations without the
+`sm` key and chooses among feasible actions when worker wait is available. Missing
+worker wait still forces HOLD. Original 18-input policies keep their SM requirement.

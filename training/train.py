@@ -10,7 +10,7 @@ import torch
 from torch.nn import functional as F
 
 from rollout_autotune import Config
-from rollout_autotune.dit import ACTIONS, INPUT, CONTEXT, FORMAT, CPUModel, action_mask, features, token
+from rollout_autotune.dit import ACTIONS, INPUT, CONTEXT, FORMAT, NO_SM_FORMAT, NO_SM_COLUMNS, model_inputs, CPUModel, action_mask, features, token
 from model import Transformer
 from simulator import Worlds,make_data
 
@@ -66,7 +66,11 @@ def main():
     p.add_argument('--seed',type=int,default=82)
     p.add_argument('--real-windows',type=Path,action='append',default=[])
     p.add_argument('--real-changes',type=Path,action='append',default=[])
+    p.add_argument('--no-sm', action='store_true',
+                   help='Exclude SM activity and its availability bit from both networks')
     args=p.parse_args()
+    use_sm = not args.no_sm
+    input_dim = INPUT if use_sm else len(NO_SM_COLUMNS)
     args.out.mkdir(parents=True,exist_ok=False)
     start=time.monotonic()
     torch.manual_seed(args.seed)
@@ -74,7 +78,7 @@ def main():
     device='cuda' if torch.cuda.is_available() else 'cpu'
     torch.set_num_threads(2)
     torch.set_float32_matmul_precision('high')
-    critic,actor=[Transformer(n).to(device) for n in (1,5)]
+    critic,actor=[Transformer(n,input_dim=input_dim).to(device) for n in (1,5)]
     data=make_data(Worlds(args.worlds,rng),rng)
     nr=0
     if len(args.real_windows)!=len(args.real_changes):
@@ -85,6 +89,7 @@ def main():
         data=tuple(np.concatenate((a,b)) for a,b in zip(data,real))
     counts=Counter(data[2][data[1].any(-1)].tolist())
     print('dataset',args.worlds*2,'synthetic trajectories,',nr,'real decisions',counts,flush=True)
+    data = (np.ascontiguousarray(model_inputs(data[0], use_sm)), *data[1:])
     tensors=[torch.from_numpy(d).to(device) for d in data]
     del data
     x,masks,actions,rewards,done=tensors
@@ -133,14 +138,14 @@ def main():
         torch.save(net.state_dict(),args.out/(phase+'.pt'))
     actor.eval()
     path=args.out/'policy.npz'
-    np.savez(path,format_version=FORMAT,**{k:v.cpu().numpy() for k,v in actor.state_dict().items()})
+    np.savez(path,format_version=FORMAT if use_sm else NO_SM_FORMAT,**{k:v.cpu().numpy() for k,v in actor.state_dict().items()})
     # Compare every token including bounded-context eviction to an uncached full forward.
     cpu=CPUModel(path)
-    cpu_actor=Transformer(5).eval()
+    cpu_actor=Transformer(5,input_dim=input_dim).eval()
     cpu_actor.load_state_dict(actor.state_dict())
     probe=rng.normal(size=(72,INPUT)).astype(np.float32)
     with torch.no_grad():
-        err=max(float(np.max(np.abs(cpu.logits(t)-cpu_actor(torch.from_numpy(probe[max(0,i-63):i+1])[None])[0,-1].numpy())))
+        err=max(float(np.max(np.abs(cpu.logits(t)-cpu_actor(torch.from_numpy(model_inputs(probe[max(0,i-63):i+1],use_sm))[None])[0,-1].numpy())))
                 for i,t in enumerate(probe))
     assert err<1e-4,err
     def validation(policy):
@@ -152,7 +157,7 @@ def main():
     sample_rng=np.random.default_rng(args.seed+9002)
     @torch.no_grad()
     def choose(x,idx,slot,mask,t):
-        history=torch.from_numpy(x[idx,:max(slot)+1]).to(device)
+        history=torch.from_numpy(model_inputs(x[idx,:max(slot)+1],use_sm)).to(device)
         logits=actor(history)[torch.arange(len(idx),device=device),torch.as_tensor(slot,device=device)].cpu().numpy()
         logits=np.where(mask,logits,-np.inf)
         if t<3:
@@ -161,7 +166,7 @@ def main():
         return logits.argmax(1)
     base=validation('threshold')
     new=validation(choose)
-    report=dict(seed=args.seed,synthetic_worlds=args.worlds,synthetic_trajectories=2*args.worlds,
+    report=dict(uses_sm=use_sm,input_dim=input_dim,seed=args.seed,synthetic_worlds=args.worlds,synthetic_trajectories=2*args.worlds,
                 real_transitions=nr,train_decisions=int(valid.sum()),actions=dict(counts),
                 gamma=gamma,td_lambda=lam,beta=beta,loss=losses,
                 actor_parameters=sum(p.numel() for p in actor.parameters()),
