@@ -8,3 +8,7 @@ version = "0.1.0"
 description = "A window-based concurrency controller for closed-loop policy evaluation"
 requires-python = ">=3.11"
 readme = "README.md"
+
+[project.optional-dependencies]
+dit = ["numpy>=1.24"]
+training = ["numpy>=1.24", "torch>=2.4"]
