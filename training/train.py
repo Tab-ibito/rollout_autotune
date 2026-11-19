@@ -64,8 +64,8 @@ def main():
     p.add_argument('--worlds',type=int,default=25000)
     p.add_argument('--epochs',type=int,default=3)
     p.add_argument('--seed',type=int,default=82)
-    p.add_argument('--real-windows',type=Path)
-    p.add_argument('--real-changes',type=Path)
+    p.add_argument('--real-windows',type=Path,action='append',default=[])
+    p.add_argument('--real-changes',type=Path,action='append',default=[])
     args=p.parse_args()
     args.out.mkdir(parents=True,exist_ok=False)
     start=time.monotonic()
@@ -77,11 +77,12 @@ def main():
     critic,actor=[Transformer(n).to(device) for n in (1,5)]
     data=make_data(Worlds(args.worlds,rng),rng)
     nr=0
-    if args.real_windows:
-        real=real_history(args.real_windows,args.real_changes)
-        nr=int(real[1].any(-1).sum())
+    if len(args.real_windows)!=len(args.real_changes):
+        p.error('each real window log requires its matching configuration-change log')
+    for windows,changes in zip(args.real_windows,args.real_changes):
+        real=real_history(windows,changes)
+        nr+=int(real[1].any(-1).sum())
         data=tuple(np.concatenate((a,b)) for a,b in zip(data,real))
-    names=('tokens','masks','actions','rewards','done')
     counts=Counter(data[2][data[1].any(-1)].tolist())
     print('dataset',args.worlds*2,'synthetic trajectories,',nr,'real decisions',counts,flush=True)
     tensors=[torch.from_numpy(d).to(device) for d in data]
@@ -166,7 +167,8 @@ def main():
                 actor_parameters=sum(p.numel() for p in actor.parameters()),
                 cpu_logit_max_error=err,device=device,elapsed_s=time.monotonic()-start,
                 validation=dict(held_out_synthetic_worlds=len(base),threshold_mean_s=float(base.mean()),
-                                policy_mean_s=float(new.mean()),fraction_faster=float((new<base).mean())))
+                                policy_mean_s=float(new.mean()),fraction_faster=float((new<base).mean()),
+                                wins=int((new<base).sum()), ties=int((new==base).sum()), losses=int((new>base).sum())))
     (args.out/'report.json').write_text(json.dumps(report,indent=2)+'\n')
     print(json.dumps(report),flush=True)
 

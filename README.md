@@ -44,3 +44,39 @@ Apply the first matching rule per settled window. Limits default to K ≤ 32, g 
 | Within the deadband, required observations unavailable, or the action hits a limit | Hold |
 
 The thresholds are initial hypotheses for live evaluation. The fixed throughput grid motivated the prior and search range. It does not contain the matched per-window counters required to validate these rules.
+
+## Step-fused DIT
+
+The learned controller is opt-in. The threshold baseline remains available via the original Python API and CLI; its tagged revision is `baseline/threshold-v1`. The two controllers have distinct missing-telemetry behavior.
+
+### Train
+
+From the checkout, install with `python -m pip install '.[training]'`. The following command trains two separate networks and exports CPU weights:
+
+```sh
+python training/train.py --out runs/initial --worlds 25000 --epochs 3 --seed 82
+```
+
+To include recorded transitions, append `--real-windows windows.jsonl --real-changes changes.jsonl` once per run. These files use the threshold experiment's JSONL schema. Each completed window records config, next config (null on completion), episodes, steps, formal_s, total window seconds, wait, sm and slowdown. Each acknowledged change records after_episodes and seconds. The action chosen at the end of one window receives the elapsed time of the following window plus its disjoint transition time. The initial fixed placement contributes no policy action label. Supply contiguous complete runs of at most 65 windows to this historical importer.
+
+Each synthetic task draws CPU and policy service capacities, replica scaling, switch costs, a memory limit and per-window work. Two independently sampled episodes on that same task share one causal history of at most 64 tokens; each episode starts with a reset indicator. TD targets and previous actions/rewards reset there. A rejected resize consumes time and the host keeps serving with its previous configuration. Behavior consists of the threshold policy and randomized threshold policies with 15% uniform feasible-action exploration. Each step completes a block of useful work. Negative elapsed time in units of 60 seconds is the reward; known switch time is an additional input. The simulator is an analytical prior.
+
+The value and policy transformers have independent weights. Each has four pre-RMSNorm blocks, width 128, four attention heads, RoPE and a 352-wide SwiGLU. One step fuses the current measurements, availability and reset bits, previous requested action, previous transition time and previous reward. Training uses MSE on TD(λ) with γ = λ = 0.90, then freezes the value net. Policy loss is masked cross-entropy weighted by exp(standard-deviation-scaled one-step advantage / 0.4), clipped to [0.05, 20]. Both stages use AdamW, 3e-4 initial learning rate, 0.01 weight decay, 0.1 residual dropout, batch size 64 and cosine decay. Discounting favors near-term elapsed time. Evaluate changes on undiscounted suite wall time. The report includes a paired comparison on 128 unseen synthetic worlds, independent of the training seed stream.
+
+### Deploy
+
+Install `python -m pip install '.[dit]'` on the host. Deploy only `policy.npz`; the value network and PyTorch checkpoints serve offline training. For example:
+
+```sh
+OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 python -m rollout_autotune.dit runs/initial/policy.npz
+```
+
+The JSONL protocol starts by requesting (12,3). Reply to configure with a boolean and to observe with a completed-window record such as:
+
+```json
+{"wait":0.54,"sm":0.80,"slowdown":1.4,"rate":160,"work_left":75000,"elapsed_s":30,"switch_s":0.5}
+```
+
+Use null for missing wait, SM activity or slowdown. Rate is effective environment steps/s; work_left is a decision-time estimate in the same step units. Supply total window elapsed seconds excluding the separately measured switch time; any completed rollout work counts toward the suite. Reply null instead of a record once the suite is complete. Python hosts can create a `rollout_autotune.dit.Session` for each suite and call `propose` then `acknowledge` for every decision, including holds.
+
+The actor runs exclusively in NumPy with a per-session KV cache. It applies bounds and rejected-target masks before sampling the first three windows (temperature 0.5) and then selects the highest allowed logit. Missing wait or SM activity forces HOLD, including when measured slowdown is high. A rejected destination stays masked until a new session. The action order is HOLD, K+1, K−1, g+1, g−1. After the 64-token limit the predictor rebuilds the retained suffix for equivalence with a bounded full forward.
