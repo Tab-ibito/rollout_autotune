@@ -12,3 +12,7 @@ readme = "README.md"
 [project.optional-dependencies]
 dit = ["numpy>=1.24"]
 training = ["numpy>=1.24", "torch>=2.4"]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]

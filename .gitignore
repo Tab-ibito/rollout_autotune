@@ -3,3 +3,12 @@ __pycache__/
 build/
 dist/
 .venv/
+.pytest_cache/
+/results/
+/runs/
+/.aws/
+/.env
+/.env.*
+!/.env.example
+NOTES_CN.md
+docs_zh/

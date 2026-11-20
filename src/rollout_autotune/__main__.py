@@ -1,4 +1,4 @@
-"""Run the controller as a subprocess using newline-delimited JSON over stdio."""
+"""Run the threshold controller as a subprocess using newline-delimited JSON over stdio."""
 
 import argparse
 import json
@@ -7,8 +7,11 @@ from dataclasses import asdict
 
 from . import Config, Window, run
 
+_WINDOW_FIELDS = frozenset(Window.__dataclass_fields__)
+
 
 def exchange(op: str, config: Config):
+    """Send one JSON request ``{"op": op, "k": ..., "g": ...}`` and parse one reply line."""
     print(json.dumps({"op": op, **asdict(config)}), flush=True)
     line = sys.stdin.readline()
     if not line:
@@ -17,6 +20,8 @@ def exchange(op: str, config: Config):
 
 
 class StdioRuntime:
+    """Adapter bridging the Python ``Runtime`` protocol to line-delimited JSON over stdio."""
+
     def configure(self, target: Config) -> bool:
         accepted = exchange("configure", target)
         if type(accepted) is not bool:
@@ -25,7 +30,12 @@ class StdioRuntime:
 
     def observe(self, current: Config) -> Window | None:
         data = exchange("observe", current)
-        return None if data is None else Window(**data)
+        if data is None:
+            return None
+        if not isinstance(data, dict):
+            raise ValueError("observe requires a JSON object or null")
+        # Ignore extra diagnostic fields emitted by the host.
+        return Window(**{k: v for k, v in data.items() if k in _WINDOW_FIELDS})
 
 
 def main() -> None:
